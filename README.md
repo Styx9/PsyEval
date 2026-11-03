@@ -18,3 +18,5 @@ VR pe Meta Quest , Unity **6000.6.3f1**.
 1. Pornesti Meta XR Simulator si activezi comutatorul "runtime" din stanga-sus
 2. Play in Unity
 3. Click in fereastra Simulatorului inainte de taste
+
+# Link Tema 5: Main modules : https://docs.google.com/document/d/1mD8t06BbJaWyDWqOIXX2oUErP4m-KTA5-IFM30miCEQ/edit?usp=sharing
