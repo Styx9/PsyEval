@@ -4,90 +4,95 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using UnityEngine.Events;
-using UnityEngine.UI;
 
 namespace PsyEval.Calibration
 {
-    // Panoul cu intrebari din camera de calibrare.
-    // Se pune pe un GameObject gol in scena; construieste singur un Canvas world-space in fata pacientului.
-    //
-    // Control (Quest):   joystick stanga/dreapta = alege, trigaci (index) = confirma, click pe joystick = recentreaza panoul
-    // Control (PC):      sageti stanga/dreapta sau tastele 1-5 = alege, Enter/Space = confirma, R = recentreaza
-    [DisallowMultipleComponent]
+    // Panoul cu intrebari. In camera de calibrare porneste singur,
+    // in alte scene (ex. liftul) este controlat de scriptul scenei.
     public class CalibrationRoom : MonoBehaviour
     {
         [Header("Sesiune")]
         public string sessionId = "PACIENT-TEST";
-        public bool startAutomatically = true;
+        public bool startAutomatically = true; // debifat in lift
         public bool saveJson = true;
+        public string resultFilePrefix = "calibrare";
+        public string panelTitle = "Camera de calibrare";
 
-        [Header("Întrebări (se completează automat cu setul implicit)")]
+        [Header("Intrebari")]
         public List<CalibrationQuestion> questions = new List<CalibrationQuestion>();
 
-        [Header("Plasarea panoului")]
-        [Tooltip("Optional. Daca e gol, panoul se pune in fata camerei.")]
-        public Transform panelAnchor;
-        public float distance = 1.6f;
+        [Header("Panou")]
+        public QuestionPanelUI panelPrefab;
+        public float distance = 1.6f;      // cat de departe de pacient apare panoul
         public float heightOffset = -0.1f;
-        [Tooltip("Asteapta tracking-ul castii inainte de a pozitiona panoul.")]
+        public float worldScale = 0.001f;  // 1 pixel din panou = 1 mm
         public float placementDelay = 0.6f;
-        public float worldScale = 0.001f;
 
-        [Header("Aspect")]
-        [Tooltip("Optional. Daca e gol, se foloseste fontul integrat din Unity.")]
-        public Font font;
-        public Color backgroundColor = new Color32(0xF6, 0xF4, 0xEF, 0xF5);
+        [Header("Culori pentru variantele de raspuns")]
         public Color textColor = new Color32(0x2B, 0x2D, 0x30, 0xFF);
         public Color mutedColor = new Color32(0x6B, 0x6F, 0x76, 0xFF);
-        public Color tileColor = new Color32(0xFF, 0xFF, 0xFF, 0xFF);
+        public Color tileColor = Color.white;
         public Color tileBorderColor = new Color32(0xD3, 0xCF, 0xC6, 0xFF);
         public Color accentColor = new Color32(0x3F, 0x76, 0x9A, 0xFF);
 
-        [Header("Evenimente")]
-        [Tooltip("Se apeleaza cu textul afisat (pentru naratorul TTS).")]
-        public UnityEvent<string> onTextShown = new UnityEvent<string>();
+        [Header("Narator")]
+        public CalibrationNarrator narrator;
+
         public UnityEvent<CalibrationResult> onCompleted = new UnityEvent<CalibrationResult>();
 
-        public CalibrationResult Result { get; private set; }
-        public static CalibrationResult LastResult { get; private set; }
+        [HideInInspector] public CalibrationResult Result;
+        public static CalibrationResult LastResult;
 
-        const float PanelW = 1400f, PanelH = 820f;
+        // textele de inceput si de final (le foloseste si generatorul de voce)
+        public const string IntroKey = "intro";
+        public const string IntroTitle = "Bine ați venit";
+        public const string IntroBody =
+            "Vă aflați într-o cameră liniștită. Vă vom adresa câteva întrebări scurte.\n" +
+            "Nu există răspunsuri bune sau greșite – alegeți varianta care vi se potrivește.";
+        public const string OutroKey = "final";
+        public const string OutroTitle = "Vă mulțumim!";
+        public const string OutroBody =
+            "Partea de calibrare s-a încheiat.\nRămâneți relaxat în continuare, urmează etapa următoare.";
+
         const float FadeDuration = 0.35f;
 
-        Transform panelRoot;
-        CanvasGroup canvasGroup;
-        Text titleText, bodyText, headerLeft, headerRight, hintText;
-        RectTransform progressFill;
-        GameObject optionsRow;
-        readonly List<Image> tileBorders = new List<Image>();
-        readonly List<Image> tileFills = new List<Image>();
-        readonly List<Text> tileNumbers = new List<Text>();
-        readonly List<Text> tileLabels = new List<Text>();
-
-        int selected = -1;
-        bool stickArmed = true;
+        QuestionPanelUI ui;
+        string[] currentOptions;   // textele variantelor afisate acum
+        int selected = -1;         // varianta aleasa acum (de la 0), -1 = nimic
+        float answerTime;          // cat a durat pana a confirmat
+        float firstMoveTime;       // cand a miscat prima data selectia
+        int selectionChanges;      // de cate ori si-a schimbat alegerea
+        bool stickReady = true;
         bool running;
 
-        void Reset()
+        // textul citit de narator pentru un mesaj: titlu + corp
+        public static string MessageSpeech(string title, string body)
         {
-            questions = CalibrationQuestionBank.CreateDefault();
+            if (title.EndsWith("!") || title.EndsWith("."))
+                return title + " " + body;
+            return title + ". " + body;
         }
 
-        [ContextMenu("Reîncarcă întrebările implicite")]
-        void ReloadDefaultQuestions()
+        void Awake()
         {
-            questions = CalibrationQuestionBank.CreateDefault();
+            if (narrator == null)
+                narrator = GetComponent<CalibrationNarrator>();
+            if (narrator == null)
+                narrator = gameObject.AddComponent<CalibrationNarrator>();
         }
 
         IEnumerator Start()
         {
-            if (questions == null || questions.Count == 0)
+            if (questions.Count == 0)
                 questions = CalibrationQuestionBank.CreateDefault();
 
-            BuildUI();
-            canvasGroup.alpha = 0f;
+            // panoul este un prefab facut in editor (Assets/Prefabs/PanouIntrebari)
+            ui = Instantiate(panelPrefab, transform);
+            ui.transform.localScale = Vector3.one * worldScale;
+            ui.headerLeft.text = panelTitle;
+            ui.canvasGroup.alpha = 0f;
 
-            yield return new WaitForSeconds(placementDelay);
+            yield return new WaitForSeconds(placementDelay); // asteptam sa porneasca tracking-ul castii
             PlacePanel();
 
             if (startAutomatically)
@@ -100,93 +105,184 @@ namespace PsyEval.Calibration
                 StartCoroutine(RunSession());
         }
 
-        // ---------------------------------------------------------------- flux
-
         IEnumerator RunSession()
         {
             running = true;
-            Result = new CalibrationResult
-            {
-                sessionId = sessionId,
-                startedAtUtc = DateTime.UtcNow.ToString("o")
-            };
+            BeginExternalSession();
 
-            ShowMessage(
-                "Bine ați venit",
-                "Vă aflați într-o cameră liniștită. Vă vom adresa câteva întrebări scurte.\n" +
-                "Nu există răspunsuri bune sau greșite – alegeți varianta care vi se potrivește.",
-                "Apăsați trăgaciul pentru a începe");
-            yield return Fade(1f);
-            onTextShown.Invoke(titleText.text + ". " + bodyText.text);
-            yield return WaitForConfirm();
-            yield return Fade(0f);
+            yield return ShowNotice(IntroKey, IntroTitle, IntroBody, "Apăsați trăgaciul pentru a începe   ·   B / Y = ascultați din nou");
 
             for (int i = 0; i < questions.Count; i++)
                 yield return AskQuestion(i);
 
-            FinalizeResult();
-            if (saveJson) SaveJson();
+            FinishExternalSession();
 
             SetProgress(1f);
-            ShowMessage(
-                "Vă mulțumim!",
-                "Partea de calibrare s-a încheiat.\nRămâneți relaxat în continuare, urmează etapa următoare.",
-                "");
+            ShowMessage(OutroTitle, OutroBody, "");
             yield return Fade(1f);
-            onTextShown.Invoke(titleText.text + " " + bodyText.text);
-
-            LastResult = Result;
+            narrator.Speak(OutroKey, MessageSpeech(OutroTitle, OutroBody));
             running = false;
+        }
+
+        // ---------- functii folosite si de alte scene (ex. liftul) ----------
+
+        public bool IsReady()
+        {
+            return ui != null;
+        }
+
+        public void BeginExternalSession()
+        {
+            Result = new CalibrationResult();
+            Result.sessionId = sessionId;
+            Result.startedAtUtc = DateTime.UtcNow.ToString("o");
+        }
+
+        // arata un mesaj, il citeste si asteapta tragaciul
+        public IEnumerator ShowNotice(string key, string title, string body, string hint)
+        {
+            ShowMessage(title, body, hint);
+            yield return Fade(1f);
+            narrator.Speak(key, MessageSpeech(title, body));
+            yield return WaitForConfirm();
+            narrator.Stop();
+            yield return Fade(0f);
+        }
+
+        public IEnumerator AskQuestionById(string id)
+        {
+            for (int i = 0; i < questions.Count; i++)
+            {
+                if (questions[i].id == id)
+                {
+                    yield return AskQuestion(i);
+                    yield break;
+                }
+            }
+            Debug.LogError("Intrebarea " + id + " nu exista in lista panoului.");
+        }
+
+        public void FinishExternalSession()
+        {
+            FinalizeResult();
+            if (saveJson) SaveJson();
+            LastResult = Result;
             onCompleted.Invoke(Result);
         }
+
+        // ---------- o intrebare ----------
 
         IEnumerator AskQuestion(int index)
         {
             CalibrationQuestion q = questions[index];
 
             ShowQuestion(q, index);
+            ShowOptions(CalibrationQuestionBank.ScaleLabels);
+            yield return Fade(1f);
+            narrator.Speak(q.id, q.text);
+
+            yield return WaitForAnswer();
+            RecordAnswer(q, selected + 1, answerTime, firstMoveTime, selectionChanges);
+
+            yield return new WaitForSeconds(0.4f);
+            yield return Fade(0f);
+        }
+
+        // ---------- o decizie (ex. in lift: ce faceti?) ----------
+
+        // variantele apar in locul scalei 1-5; riskyOption = numarul variantei periculoase (de la 1), 0 = niciuna
+        public IEnumerator AskChoice(string id, string question, string[] options, int riskyOption)
+        {
+            ui.optionsRow.SetActive(true);
+            ui.bodyText.gameObject.SetActive(false);
+            ui.headerRight.text = "Decizie";
+            ui.titleText.text = question;
+            ui.titleText.fontSize = 52;
+            ShowOptions(options);
+            yield return Fade(1f);
+            narrator.Speak(id, question);
+
+            yield return WaitForAnswer();
+
+            ChoiceAnswer c = new ChoiceAnswer();
+            c.id = id;
+            c.question = question;
+            c.choice = selected + 1;
+            c.choiceText = options[selected];
+            c.risky = selected + 1 == riskyOption;
+            c.responseTimeSec = answerTime;
+            c.firstMoveTimeSec = firstMoveTime;
+            c.selectionChanges = selectionChanges;
+            Result.choices.Add(c);
+            if (c.risky)
+                Result.flags.Add(id + ": a ales o variantă riscantă („" + c.choiceText + "”).");
+
+            yield return new WaitForSeconds(0.4f);
+            yield return Fade(0f);
+            ShowOptions(CalibrationQuestionBank.ScaleLabels); // panoul revine la scala 1-5
+        }
+
+        // asteapta pana cand pacientul alege si confirma o varianta; masoara timpii
+        IEnumerator WaitForAnswer()
+        {
             selected = -1;
             RefreshTiles(false);
-            yield return Fade(1f);
-            onTextShown.Invoke(q.text);
 
-            float shownAt = Time.unscaledTime;
-            float firstMove = -1f;
-            int changes = 0;
+            float shownAt = Time.time;
+            firstMoveTime = -1f;
+            selectionChanges = 0;
 
             while (true)
             {
-                int prev = selected;
-                int direct = ReadDirectKey();
-                int step = ReadHorizontalStep();
+                int previous = selected;
+                int step = ReadStep();
+                int key = ReadNumberKey();
+                int last = currentOptions.Length - 1;
 
-                if (direct >= 0)
-                    selected = direct;
+                if (key >= 0 && key <= last)
+                    selected = key;
                 else if (step != 0)
-                    selected = selected < 0
-                        ? (step > 0 ? 0 : CalibrationQuestionBank.OptionCount - 1)
-                        : Mathf.Clamp(selected + step, 0, CalibrationQuestionBank.OptionCount - 1);
-
-                if (selected != prev)
                 {
-                    if (firstMove < 0f) firstMove = Time.unscaledTime - shownAt;
-                    if (prev >= 0) changes++;
+                    if (selected < 0)
+                        selected = step > 0 ? 0 : last;
+                    else
+                        selected = Mathf.Clamp(selected + step, 0, last);
+                }
+
+                if (selected != previous)
+                {
+                    if (firstMoveTime < 0f) firstMoveTime = Time.time - shownAt;
+                    if (previous >= 0) selectionChanges++;
                     RefreshTiles(false);
                 }
 
                 if (RecenterPressed()) PlacePanel();
+                if (RepeatPressed()) narrator.Repeat();
                 if (selected >= 0 && ConfirmPressed()) break;
 
                 yield return null;
             }
 
-            float rt = Time.unscaledTime - shownAt;
-            RecordAnswer(q, selected + 1, rt, firstMove, changes);
-
+            answerTime = Time.time - shownAt;
+            narrator.Stop();
             RefreshTiles(true);
-            hintText.text = "";
-            yield return new WaitForSeconds(0.4f);
-            yield return Fade(0f);
+            ui.hintText.text = "";
+        }
+
+        // pune textele variantelor in casute; daca sunt mai putin de 5, le ascundem pe cele in plus
+        void ShowOptions(string[] options)
+        {
+            currentOptions = options;
+            for (int i = 0; i < 5; i++)
+            {
+                bool visible = i < options.Length;
+                ui.tileBorders[i].gameObject.SetActive(visible);
+                if (visible) ui.tileLabels[i].text = options[i];
+            }
+
+            // centram randul: fiecare casuta lipsa = jumatate de casuta (124 px) spre dreapta
+            RectTransform row = ui.optionsRow.GetComponent<RectTransform>();
+            row.anchoredPosition = new Vector2((5 - options.Length) * 124f, 0f);
         }
 
         IEnumerator WaitForConfirm()
@@ -194,121 +290,120 @@ namespace PsyEval.Calibration
             while (!ConfirmPressed())
             {
                 if (RecenterPressed()) PlacePanel();
+                if (RepeatPressed()) narrator.Repeat();
                 yield return null;
             }
         }
 
         IEnumerator Fade(float target)
         {
-            float start = canvasGroup.alpha;
-            for (float t = 0f; t < FadeDuration; t += Time.unscaledDeltaTime)
+            float start = ui.canvasGroup.alpha;
+            for (float t = 0f; t < FadeDuration; t += Time.deltaTime)
             {
-                canvasGroup.alpha = Mathf.Lerp(start, target, t / FadeDuration);
+                ui.canvasGroup.alpha = Mathf.Lerp(start, target, t / FadeDuration);
                 yield return null;
             }
-            canvasGroup.alpha = target;
+            ui.canvasGroup.alpha = target;
         }
 
-        // ---------------------------------------------------------------- rezultate
+        // ---------- rezultate ----------
 
-        void RecordAnswer(CalibrationQuestion q, int answer, float rt, float firstMove, int changes)
+        void RecordAnswer(CalibrationQuestion q, int answer, float time, float firstMove, int changes)
         {
-            int scored = q.reverseScored ? (CalibrationQuestionBank.OptionCount + 1 - answer) : answer;
-            bool isControl = q.expectedAnswer > 0;
+            int scored = answer;
+            if (q.reverseScored)
+                scored = 6 - answer; // 5 devine 1, 4 devine 2 ...
 
-            Result.answers.Add(new CalibrationAnswer
-            {
-                questionId = q.id,
-                dimension = q.dimension.ToString(),
-                answer = answer,
-                score0to100 = Mathf.RoundToInt((scored - 1) * 100f / (CalibrationQuestionBank.OptionCount - 1)),
-                responseTimeSec = rt,
-                firstMoveTimeSec = firstMove,
-                selectionChanges = changes,
-                isControl = isControl,
-                controlPassed = !isControl || answer == q.expectedAnswer,
-                flagged = q.flagThreshold > 0 && answer >= q.flagThreshold
-            });
+            CalibrationAnswer a = new CalibrationAnswer();
+            a.questionId = q.id;
+            a.dimension = q.dimension.ToString();
+            a.answer = answer;
+            a.score0to100 = (scored - 1) * 25; // 1 -> 0, 2 -> 25 ... 5 -> 100
+            a.responseTimeSec = time;
+            a.firstMoveTimeSec = firstMove;
+            a.selectionChanges = changes;
+            a.isControl = q.expectedAnswer > 0;
+            a.controlPassed = !a.isControl || answer == q.expectedAnswer;
+            a.flagged = q.flagThreshold > 0 && answer >= q.flagThreshold;
+            Result.answers.Add(a);
         }
 
         void FinalizeResult()
         {
             Result.finishedAtUtc = DateTime.UtcNow.ToString("o");
 
-            float sum = 0f, motorSum = 0f;
-            int n = 0, motorN = 0;
-            bool attentionOk = true;
+            float sum = 0f, controlSum = 0f;
+            int count = 0, controlCount = 0;
+            Result.attentionCheckPassed = true;
 
-            for (int i = 0; i < Result.answers.Count; i++)
+            foreach (CalibrationAnswer a in Result.answers)
             {
-                CalibrationAnswer a = Result.answers[i];
-                CalibrationQuestion q = questions[i];
+                CalibrationQuestion q = FindQuestion(a.questionId);
 
                 if (a.isControl)
                 {
-                    motorSum += a.responseTimeSec;
-                    motorN++;
+                    controlSum += a.responseTimeSec;
+                    controlCount++;
                     if (!a.controlPassed)
                     {
-                        attentionOk = false;
-                        Result.flags.Add($"{a.questionId}: întrebarea de control a primit {a.answer} în loc de {q.expectedAnswer}.");
+                        Result.attentionCheckPassed = false;
+                        Result.flags.Add(a.questionId + ": întrebarea de control a primit " + a.answer + " în loc de " + q.expectedAnswer + ".");
                     }
                 }
                 if (q.countsForScore)
                 {
                     sum += a.responseTimeSec;
-                    n++;
+                    count++;
                 }
                 if (a.flagged)
-                    Result.flags.Add($"{a.questionId} ({a.dimension}): răspuns {a.answer} – posibilă prezentare favorabilă de sine.");
+                    Result.flags.Add(a.questionId + " (" + a.dimension + "): răspuns " + a.answer + " – posibilă prezentare favorabilă de sine.");
             }
 
-            Result.meanResponseTimeSec = n > 0 ? sum / n : 0f;
-            Result.motorBaselineSec = motorN > 0 ? motorSum / motorN : 0f;
-            Result.attentionCheckPassed = attentionOk;
+            if (count > 0) Result.meanResponseTimeSec = sum / count;
+            if (controlCount > 0) Result.motorBaselineSec = controlSum / controlCount;
+        }
+
+        CalibrationQuestion FindQuestion(string id)
+        {
+            foreach (CalibrationQuestion q in questions)
+                if (q.id == id) return q;
+            return null;
         }
 
         void SaveJson()
         {
-            try
-            {
-                string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                string path = Path.Combine(Application.persistentDataPath, $"calibrare_{sessionId}_{stamp}.json");
-                File.WriteAllText(path, JsonUtility.ToJson(Result, true));
-                Debug.Log($"[PsyEval] Rezultatele calibrării au fost salvate în: {path}");
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[PsyEval] Nu s-au putut salva rezultatele calibrării: {e.Message}");
-            }
+            string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string path = Path.Combine(Application.persistentDataPath, resultFilePrefix + "_" + sessionId + "_" + stamp + ".json");
+            File.WriteAllText(path, JsonUtility.ToJson(Result, true));
+            Debug.Log("Rezultatele au fost salvate in: " + path);
         }
 
-        // ---------------------------------------------------------------- input
+        // ---------- input (controller + tastatura pentru test pe PC) ----------
 
-        static float StickX(OVRInput.Controller c) => OVRInput.Get(OVRInput.Axis2D.PrimaryThumbstick, c).x;
-
-        int ReadHorizontalStep()
+        int ReadStep()
         {
             if (Input.GetKeyDown(KeyCode.RightArrow)) return 1;
             if (Input.GetKeyDown(KeyCode.LeftArrow)) return -1;
 
-            float l = StickX(OVRInput.Controller.LTouch);
-            float r = StickX(OVRInput.Controller.RTouch);
-            float x = Mathf.Abs(l) > Mathf.Abs(r) ? l : r;
+            // joystick-ul din stanga sau din dreapta, care e mai miscat
+            float left = OVRInput.Get(OVRInput.Axis2D.PrimaryThumbstick, OVRInput.Controller.LTouch).x;
+            float right = OVRInput.Get(OVRInput.Axis2D.PrimaryThumbstick, OVRInput.Controller.RTouch).x;
+            float x = Mathf.Abs(left) > Mathf.Abs(right) ? left : right;
 
-            if (stickArmed && Mathf.Abs(x) > 0.6f)
+            // un pas pe miscare: trebuie sa lase joystick-ul inapoi la mijloc inainte de urmatorul pas
+            if (stickReady && Mathf.Abs(x) > 0.6f)
             {
-                stickArmed = false;
+                stickReady = false;
                 return x > 0f ? 1 : -1;
             }
-            if (!stickArmed && Mathf.Abs(x) < 0.3f)
-                stickArmed = true;
+            if (Mathf.Abs(x) < 0.3f)
+                stickReady = true;
             return 0;
         }
 
-        static int ReadDirectKey()
+        int ReadNumberKey()
         {
-            for (int i = 0; i < CalibrationQuestionBank.OptionCount; i++)
+            for (int i = 0; i < 5; i++)
             {
                 if (Input.GetKeyDown(KeyCode.Alpha1 + i) || Input.GetKeyDown(KeyCode.Keypad1 + i))
                     return i;
@@ -316,228 +411,108 @@ namespace PsyEval.Calibration
             return -1;
         }
 
-        static bool ConfirmPressed()
+        bool ConfirmPressed()
         {
             return OVRInput.GetDown(OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.LTouch)
                 || OVRInput.GetDown(OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.RTouch)
                 || Input.GetKeyDown(KeyCode.Return)
-                || Input.GetKeyDown(KeyCode.KeypadEnter)
                 || Input.GetKeyDown(KeyCode.Space);
         }
 
-        static bool RecenterPressed()
+        // click pe joystick sau R = aduce panoul din nou in fata
+        bool RecenterPressed()
         {
             return OVRInput.GetDown(OVRInput.Button.PrimaryThumbstick, OVRInput.Controller.LTouch)
                 || OVRInput.GetDown(OVRInput.Button.PrimaryThumbstick, OVRInput.Controller.RTouch)
                 || Input.GetKeyDown(KeyCode.R);
         }
 
-        // ---------------------------------------------------------------- plasare
-
-        public void PlacePanel()
+        // B / Y sau T = asculta din nou
+        bool RepeatPressed()
         {
-            if (panelRoot == null) return;
-
-            if (panelAnchor != null)
-            {
-                panelRoot.SetPositionAndRotation(panelAnchor.position, panelAnchor.rotation);
-                return;
-            }
-
-            Camera cam = Camera.main;
-            if (cam == null)
-            {
-                Debug.LogWarning("[PsyEval] Nu există Camera.main – panoul rămâne la poziția obiectului.");
-                return;
-            }
-
-            Vector3 forward = Vector3.ProjectOnPlane(cam.transform.forward, Vector3.up);
-            if (forward.sqrMagnitude < 0.001f) forward = Vector3.forward;
-            forward.Normalize();
-
-            Vector3 pos = cam.transform.position + forward * distance + Vector3.up * heightOffset;
-            panelRoot.SetPositionAndRotation(pos, Quaternion.LookRotation(forward, Vector3.up));
+            return OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.RTouch)
+                || OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.LTouch)
+                || Input.GetKeyDown(KeyCode.T);
         }
 
-        // ---------------------------------------------------------------- afisare
+        // ---------- afisare ----------
+
+        // pune panoul in fata pacientului, in directia in care se uita
+        public void PlacePanel()
+        {
+            if (Camera.main == null) return;
+            PlacePanel(Camera.main.transform.forward);
+        }
+
+        // pune panoul in fata pacientului, intr-o directie data (ex. in lift: spre usi)
+        public void PlacePanel(Vector3 direction)
+        {
+            if (ui == null || Camera.main == null) return;
+
+            Vector3 forward = direction;
+            forward.y = 0f;
+            forward.Normalize();
+
+            Vector3 head = Camera.main.transform.position;
+            ui.transform.position = head + forward * distance + Vector3.up * heightOffset;
+            ui.transform.rotation = Quaternion.LookRotation(forward);
+        }
 
         void ShowMessage(string title, string body, string hint)
         {
-            optionsRow.SetActive(false);
-            bodyText.gameObject.SetActive(true);
-            headerRight.text = "";
-            titleText.text = title;
-            titleText.fontSize = 60;
-            SetRect(titleText.rectTransform, 80, 170, PanelW - 160, 120);
-            bodyText.text = body;
-            hintText.text = hint;
+            ui.optionsRow.SetActive(false);
+            ui.bodyText.gameObject.SetActive(true);
+            ui.headerRight.text = "";
+            ui.titleText.text = title;
+            ui.titleText.fontSize = 60;
+            ui.bodyText.text = body;
+            ui.hintText.text = hint;
         }
 
         void ShowQuestion(CalibrationQuestion q, int index)
         {
-            optionsRow.SetActive(true);
-            bodyText.gameObject.SetActive(false);
-            headerRight.text = $"Întrebarea {index + 1} din {questions.Count}";
-            titleText.text = q.text;
-            titleText.fontSize = 52;
-            SetRect(titleText.rectTransform, 80, 150, PanelW - 160, 250);
+            ui.optionsRow.SetActive(true);
+            ui.bodyText.gameObject.SetActive(false);
+            ui.headerRight.text = "Întrebarea " + (index + 1) + " din " + questions.Count;
+            ui.titleText.text = q.text;
+            ui.titleText.fontSize = 52;
             SetProgress((float)index / questions.Count);
         }
 
+        // coloreaza varianta aleasa
         void RefreshTiles(bool confirmed)
         {
-            for (int i = 0; i < tileFills.Count; i++)
+            for (int i = 0; i < currentOptions.Length; i++)
             {
-                bool on = i == selected;
-                tileBorders[i].color = on ? accentColor : tileBorderColor;
-                tileFills[i].color = on ? (confirmed ? Color.Lerp(accentColor, Color.white, 0.15f) : accentColor) : tileColor;
-                tileNumbers[i].color = on ? Color.white : textColor;
-                tileLabels[i].color = on ? Color.white : mutedColor;
-                tileBorders[i].rectTransform.localScale = Vector3.one * (on ? 1.07f : 1f);
+                bool isSelected = i == selected;
+                if (isSelected)
+                {
+                    ui.tileBorders[i].color = accentColor;
+                    ui.tileFills[i].color = confirmed ? Color.Lerp(accentColor, Color.white, 0.15f) : accentColor;
+                    ui.tileNumbers[i].color = Color.white;
+                    ui.tileLabels[i].color = Color.white;
+                    ui.tileBorders[i].transform.localScale = Vector3.one * 1.07f;
+                }
+                else
+                {
+                    ui.tileBorders[i].color = tileBorderColor;
+                    ui.tileFills[i].color = tileColor;
+                    ui.tileNumbers[i].color = textColor;
+                    ui.tileLabels[i].color = mutedColor;
+                    ui.tileBorders[i].transform.localScale = Vector3.one;
+                }
             }
 
             if (confirmed) return;
-            hintText.text = selected < 0
-                ? "Mișcați joystick-ul stânga / dreapta pentru a alege un răspuns"
-                : $"Ați ales „{selected + 1} – {CalibrationQuestionBank.ScaleLabels[selected]}”.  Apăsați trăgaciul pentru a confirma.";
+            if (selected < 0)
+                ui.hintText.text = "Mișcați joystick-ul stânga / dreapta pentru a alege   ·   B / Y = ascultați din nou";
+            else
+                ui.hintText.text = "Ați ales „" + (selected + 1) + " – " + currentOptions[selected] + "”.  Apăsați trăgaciul pentru a confirma.";
         }
 
-        void SetProgress(float p)
+        void SetProgress(float progress)
         {
-            progressFill.anchorMax = new Vector2(Mathf.Clamp01(p), 1f);
-        }
-
-        // ---------------------------------------------------------------- constructie UI
-
-        void BuildUI()
-        {
-            if (font == null)
-                font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-
-            var root = new GameObject("CalibrationPanel",
-                typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler), typeof(CanvasGroup));
-            root.transform.SetParent(transform, false);
-            panelRoot = root.transform;
-
-            root.GetComponent<Canvas>().renderMode = RenderMode.WorldSpace;
-            root.GetComponent<CanvasScaler>().dynamicPixelsPerUnit = 3f;
-            canvasGroup = root.GetComponent<CanvasGroup>();
-            canvasGroup.interactable = false;
-            canvasGroup.blocksRaycasts = false;
-
-            var rt = (RectTransform)root.transform;
-            rt.sizeDelta = new Vector2(PanelW, PanelH);
-            rt.localScale = Vector3.one * worldScale;
-
-            Image bg = CreateImage("Fundal", rt, backgroundColor);
-            Stretch(bg.rectTransform, 0f);
-
-            // progres
-            Image progressBg = CreateImage("Progres", rt, tileBorderColor);
-            SetRect(progressBg.rectTransform, 60, 50, PanelW - 120, 10);
-            Image fill = CreateImage("ProgresUmplere", progressBg.rectTransform, accentColor);
-            progressFill = fill.rectTransform;
-            progressFill.anchorMin = Vector2.zero;
-            progressFill.anchorMax = new Vector2(0f, 1f);
-            progressFill.offsetMin = progressFill.offsetMax = Vector2.zero;
-
-            // antet
-            headerLeft = CreateText("AntetStanga", rt, 30, FontStyle.Normal, mutedColor, TextAnchor.MiddleLeft);
-            SetRect(headerLeft.rectTransform, 60, 75, 700, 50);
-            headerLeft.text = "Camera de calibrare";
-            headerRight = CreateText("AntetDreapta", rt, 30, FontStyle.Normal, mutedColor, TextAnchor.MiddleRight);
-            SetRect(headerRight.rectTransform, PanelW - 760, 75, 700, 50);
-
-            // titlu / intrebare
-            titleText = CreateText("Intrebare", rt, 52, FontStyle.Bold, textColor, TextAnchor.MiddleCenter);
-            SetRect(titleText.rectTransform, 80, 150, PanelW - 160, 250);
-
-            // corp mesaj (intro / final)
-            bodyText = CreateText("Mesaj", rt, 38, FontStyle.Normal, textColor, TextAnchor.UpperCenter);
-            SetRect(bodyText.rectTransform, 110, 330, PanelW - 220, 300);
-            bodyText.lineSpacing = 1.2f;
-
-            // grila de raspunsuri 1-5
-            var rowGo = new GameObject("Raspunsuri", typeof(RectTransform));
-            rowGo.transform.SetParent(rt, false);
-            optionsRow = rowGo;
-            var row = (RectTransform)rowGo.transform;
-            Stretch(row, 0f);
-
-            const float tileW = 228f, tileH = 220f, gap = 20f, border = 4f;
-            float totalW = CalibrationQuestionBank.OptionCount * tileW + (CalibrationQuestionBank.OptionCount - 1) * gap;
-            float x0 = (PanelW - totalW) / 2f;
-
-            for (int i = 0; i < CalibrationQuestionBank.OptionCount; i++)
-            {
-                Image b = CreateImage($"Varianta{i + 1}", row, tileBorderColor);
-                SetRect(b.rectTransform, x0 + i * (tileW + gap), 440, tileW, tileH);
-                b.rectTransform.pivot = new Vector2(0.5f, 0.5f);
-                b.rectTransform.anchoredPosition += new Vector2(tileW / 2f, -tileH / 2f);
-
-                Image f = CreateImage("Interior", b.rectTransform, tileColor);
-                Stretch(f.rectTransform, border);
-
-                Text num = CreateText("Numar", f.rectTransform, 84, FontStyle.Bold, textColor, TextAnchor.MiddleCenter);
-                SetRect(num.rectTransform, 0, 15, tileW - 2 * border, 110);
-                num.text = (i + 1).ToString();
-
-                Text lbl = CreateText("Eticheta", f.rectTransform, 28, FontStyle.Normal, mutedColor, TextAnchor.MiddleCenter);
-                SetRect(lbl.rectTransform, 10, 125, tileW - 2 * border - 20, 80);
-                lbl.text = CalibrationQuestionBank.ScaleLabels[i];
-
-                tileBorders.Add(b);
-                tileFills.Add(f);
-                tileNumbers.Add(num);
-                tileLabels.Add(lbl);
-            }
-
-            // indicatie jos
-            hintText = CreateText("Indicatie", rt, 30, FontStyle.Normal, mutedColor, TextAnchor.MiddleCenter);
-            SetRect(hintText.rectTransform, 60, 720, PanelW - 120, 60);
-        }
-
-        Image CreateImage(string name, Transform parent, Color color)
-        {
-            var go = new GameObject(name, typeof(RectTransform), typeof(Image));
-            go.transform.SetParent(parent, false);
-            var img = go.GetComponent<Image>();
-            img.color = color;
-            img.raycastTarget = false;
-            return img;
-        }
-
-        Text CreateText(string name, Transform parent, int size, FontStyle style, Color color, TextAnchor align)
-        {
-            var go = new GameObject(name, typeof(RectTransform), typeof(Text));
-            go.transform.SetParent(parent, false);
-            var t = go.GetComponent<Text>();
-            t.font = font;
-            t.fontSize = size;
-            t.fontStyle = style;
-            t.color = color;
-            t.alignment = align;
-            t.horizontalOverflow = HorizontalWrapMode.Wrap;
-            t.verticalOverflow = VerticalWrapMode.Overflow;
-            t.raycastTarget = false;
-            return t;
-        }
-
-        // pozitionare absoluta in pixeli, din coltul stanga-sus al parintelui
-        static void SetRect(RectTransform r, float x, float y, float w, float h)
-        {
-            r.anchorMin = r.anchorMax = new Vector2(0f, 1f);
-            r.pivot = new Vector2(0f, 1f);
-            r.anchoredPosition = new Vector2(x, -y);
-            r.sizeDelta = new Vector2(w, h);
-        }
-
-        static void Stretch(RectTransform r, float inset)
-        {
-            r.anchorMin = Vector2.zero;
-            r.anchorMax = Vector2.one;
-            r.offsetMin = new Vector2(inset, inset);
-            r.offsetMax = new Vector2(-inset, -inset);
+            ui.progressFill.anchorMax = new Vector2(Mathf.Clamp01(progress), 1f);
         }
     }
 }

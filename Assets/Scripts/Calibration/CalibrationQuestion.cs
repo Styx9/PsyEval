@@ -57,13 +57,10 @@ namespace PsyEval.Calibration
             "Total de acord"
         };
 
-        // Setul implicit pentru camera de calibrare. Formularile sunt neutre ca gen
-        // ("ma simt in largul meu" in loc de "calm/calma").
         public static List<CalibrationQuestion> CreateDefault()
         {
             return new List<CalibrationQuestion>
             {
-                // 0. Proba: invata controlul + masoara timpul de reactie "motor" si atentia.
                 new CalibrationQuestion
                 {
                     id = "CAL-0",
@@ -145,5 +142,20 @@ namespace PsyEval.Calibration
         public bool attentionCheckPassed;
         public List<string> flags = new List<string>();
         public List<CalibrationAnswer> answers = new List<CalibrationAnswer>();
+        public List<ChoiceAnswer> choices = new List<ChoiceAnswer>(); // deciziile din scenele de stres
+    }
+
+    // O decizie luata intr-o scena de stres (ex. in lift: ce face cand se blocheaza).
+    [Serializable]
+    public class ChoiceAnswer
+    {
+        public string id;
+        public string question;
+        public int choice;              // varianta aleasa, de la 1
+        public string choiceText;
+        public bool risky;              // varianta considerata periculoasa
+        public float responseTimeSec;
+        public float firstMoveTimeSec;
+        public int selectionChanges;
     }
 }
