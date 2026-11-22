@@ -112,3 +112,6 @@ InitTestScene*.unity*
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# Piper TTS (se descarca cu Tools/setup_piper.ps1)
+/Tools/piper/
